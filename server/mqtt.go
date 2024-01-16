@@ -234,6 +234,8 @@ type mqttSessionManager struct {
 	sessions map[string]*mqttAccountSessionManager // key is account name
 }
 
+var testDisableRMSCache = false
+
 type mqttAccountSessionManager struct {
 	mu         sync.RWMutex
 	sessions   map[string]*mqttSession        // key is MQTT client ID
@@ -1142,7 +1144,7 @@ func (s *Server) mqttCreateAccountSessionManager(acc *Account, quitCh chan struc
 			quitCh: quitCh,
 		},
 	}
-	if !opts.MQTT.disableRetainedMessageCache {
+	if !testDisableRMSCache {
 		as.rmsCache = &sync.Map{}
 	}
 	// TODO record domain name in as here

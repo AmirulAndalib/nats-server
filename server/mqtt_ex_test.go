@@ -270,8 +270,9 @@ func (bc mqttBenchContext) initServer(b *testing.B) {
 func (bc *mqttBenchContext) startServer(b *testing.B, disableRMSCache bool) func() {
 	b.Helper()
 	b.StopTimer()
+	prevDisableRMSCache := testDisableRMSCache
+	testDisableRMSCache = disableRMSCache
 	o := testMQTTDefaultOptions()
-	o.MQTT.disableRetainedMessageCache = disableRMSCache
 	s := testMQTTRunServer(b, o)
 
 	o = s.getOpts()
@@ -280,17 +281,16 @@ func (bc *mqttBenchContext) startServer(b *testing.B, disableRMSCache bool) func
 	bc.initServer(b)
 	return func() {
 		testMQTTShutdownServer(s)
+		testDisableRMSCache = prevDisableRMSCache
 	}
 }
 
 func (bc *mqttBenchContext) startCluster(b *testing.B, disableRMSCache bool) func() {
 	b.Helper()
 	b.StopTimer()
-	v := "false"
-	if disableRMSCache {
-		v = "true"
-	}
-	confPt1 := `
+	prevDisableRMSCache := testDisableRMSCache
+	testDisableRMSCache = disableRMSCache
+	conf := `
 		listen: 127.0.0.1:-1
 		server_name: %s
 		jetstream: {max_mem_store: 256MB, max_file_store: 2GB, store_dir: '%s'}
@@ -304,21 +304,21 @@ func (bc *mqttBenchContext) startCluster(b *testing.B, disableRMSCache bool) fun
 		mqtt {
 			listen: 127.0.0.1:-1
 			stream_replicas: 3
-			disable_retained_message_cache: `
-	confPt2 := `
 		}
 
 		# For access to system account.
 		accounts { $SYS { users = [ { user: "admin", pass: "s3cr3t!" } ] } }
 	`
-	conf := confPt1 + v + confPt2
 
 	cl := createJetStreamClusterWithTemplate(b, conf, "MQTT", 3)
 	o := cl.randomNonLeader().getOpts()
 	bc.Host = o.MQTT.Host
 	bc.Port = o.MQTT.Port
 	bc.initServer(b)
-	return cl.shutdown
+	return func() {
+		cl.shutdown()
+		testDisableRMSCache = prevDisableRMSCache
+	}
 }
 
 func mqttBenchWrapForMatrixField(
