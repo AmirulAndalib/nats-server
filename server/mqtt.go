@@ -245,7 +245,7 @@ type mqttAccountSessionManager struct {
 	flapTimer  *time.Timer                    // Timer to perform some cleanup of the flappers map
 	sl         *Sublist                       // sublist allowing to find retained messages for given subscription
 	retmsgs    map[string]*mqttRetainedMsgRef // retained messages
-	rmsCache   *sync.Map                      // map[string(subject)]mqttRetainedMsg
+	rmsCache   *sync.Map                      // map[subject]mqttRetainedMsg
 	jsa        mqttJSA
 	rrmLastSeq uint64        // Restore retained messages expected last sequence
 	rrmDoneCh  chan struct{} // To notify the caller that all retained messages have been loaded
