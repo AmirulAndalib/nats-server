@@ -30,7 +30,6 @@ jobs:
           sudo apt install ./mqtt-cli-4.20.0.deb
           # <>/<> FIXME: use @latest
           go install github.com/ConnectEverything/mqtt-test@7a66171
-          go install golang.org/x/perf/cmd/benchstat@latest
 
       - name: Download benchmark result for ${{ github.base_ref || github.ref_name }}
         uses: dawidd6/action-download-artifact@v2
