@@ -20,7 +20,8 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: 1.21
+          go-version-file: src/github.com/nats-io/nats-server/go.mod
+          cache-dependency-path: src/github.com/nats-io/nats-server/go.sum
 
       - name: Set up testing tools and environment
         shell: bash --noprofile --norc -eo pipefail {0}
