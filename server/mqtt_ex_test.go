@@ -401,8 +401,8 @@ func (r MQTTBenchmarkResult) report(b *testing.B) {
 	// Disable the default ns metric in favor of custom X_ms/op.
 	b.ReportMetric(0, "ns/op")
 
-	// Disable MB/s since the github benchmarking action misinterprets the
-	// result.
+	// Disable MB/s since the github benchmarking action misinterprets the sign
+	// of the result (treats it as less is better).
 	b.SetBytes(0)
 	// b.SetBytes(r.Bytes)
 
