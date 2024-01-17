@@ -92,8 +92,8 @@ var mqttBenchDefaultMatrix = mqttBenchMatrix{
 	QOS:         []int{0, 1, 2},
 	MessageSize: []int{100, 1 * KB, 10 * KB},
 	Topics:      []int{100},
-	Publishers:  []int{1, 3},
-	Subscribers: []int{1, 3},
+	Publishers:  []int{1},
+	Subscribers: []int{1},
 }
 
 type MQTTBenchmarkResult struct {
