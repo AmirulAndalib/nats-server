@@ -410,7 +410,7 @@ func (r MQTTBenchmarkResult) report(b *testing.B) {
 		nsOp := float64(ns) / float64(r.Ops)
 		b.ReportMetric(nsOp/1000000, unit+"_ms/op")
 	}
-	
+
 	// Diable ReportAllocs() since it confuses the github benchmarking action
 	// with the noise.
 	// b.ReportAllocs()
