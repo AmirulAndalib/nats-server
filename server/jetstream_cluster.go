@@ -597,7 +597,7 @@ func (js *jetStream) isConsumerHealthy(mset *stream, consumer string, ca *consum
 			mset.mu.RLock()
 			accName, streamName := mset.acc.GetName(), mset.cfg.Name
 			mset.mu.RUnlock()
-			s.Warnf("Detected consumer cluster node skew '%s > %s'", accName, streamName, consumer)
+			s.Warnf("Detected consumer cluster node skew '%s > %s > %s'", accName, streamName, consumer)
 			node.Delete()
 			o.deleteWithoutAdvisory()
 			restartConsumer()
@@ -1123,6 +1123,7 @@ func (js *jetStream) checkForOrphans() {
 
 	for accName, jsa := range js.accounts {
 		asa := cc.streams[accName]
+		jsa.mu.RLock()
 		for stream, mset := range jsa.streams {
 			if sa := asa[stream]; sa == nil {
 				streams = append(streams, mset)
@@ -1136,6 +1137,7 @@ func (js *jetStream) checkForOrphans() {
 				}
 			}
 		}
+		jsa.mu.RUnlock()
 	}
 	js.mu.Unlock()
 
@@ -4656,16 +4658,6 @@ func (js *jetStream) monitorConsumer(o *consumer, ca *consumerAssignment) {
 		case isLeader = <-lch:
 			if recovering && !isLeader {
 				js.setConsumerAssignmentRecovering(ca)
-			}
-
-			// Synchronize everyone to our state.
-			if isLeader && n != nil {
-				// Only send out if we have state.
-				if _, _, applied := n.Progress(); applied > 0 {
-					if snap, err := o.store.EncodedState(); err == nil {
-						n.SendSnapshot(snap)
-					}
-				}
 			}
 
 			// Process the change.

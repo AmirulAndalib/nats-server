@@ -14,16 +14,18 @@
 package server
 
 import (
-	"crypto/rand"
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"math"
+	"math/rand"
 	"os"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats-server/v2/internal/fastrand"
 	"github.com/nats-io/nats.go"
 )
 
@@ -73,14 +75,17 @@ func BenchmarkCoreRequestReply(b *testing.B) {
 
 			var errors = 0
 
-			// Create message (reused for all requests)
+			// Create message
 			messageData := make([]byte, messageSize)
+			rand.New(rand.NewSource(12345)).Read(messageData)
+
 			b.SetBytes(messageSize)
-			rand.Read(messageData)
 
 			// Benchmark
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
+				fastRandomMutation(messageData, 10)
+
 				_, err := ncPub.Request(subject, messageData, time.Second)
 				if err != nil {
 					errors++
@@ -205,7 +210,7 @@ func BenchmarkCoreTLSFanOut(b *testing.B) {
 
 										// random bytes as payload
 										messageData := make([]byte, messageSize)
-										rand.Read(messageData)
+										rand.New(rand.NewSource(12345)).Read(messageData)
 
 										quitCh := make(chan bool, 1)
 
@@ -218,6 +223,7 @@ func BenchmarkCoreTLSFanOut(b *testing.B) {
 													// continue publishing
 												}
 
+												fastRandomMutation(messageData, 10)
 												err := ncPub.Publish(subject, messageData)
 												if err != nil {
 													errorCount += 1
@@ -344,7 +350,7 @@ func BenchmarkCoreFanOut(b *testing.B) {
 
 							// random bytes as payload
 							messageData := make([]byte, messageSize)
-							rand.Read(messageData)
+							rand.New(rand.NewSource(123456)).Read(messageData)
 
 							quitCh := make(chan bool, 1)
 
@@ -357,6 +363,7 @@ func BenchmarkCoreFanOut(b *testing.B) {
 										// continue publishing
 									}
 
+									fastRandomMutation(messageData, 10)
 									err := ncPub.Publish(subject, messageData)
 									if err != nil {
 										errorCount += 1
@@ -388,10 +395,6 @@ func BenchmarkCoreFanOut(b *testing.B) {
 }
 
 func BenchmarkCoreFanIn(b *testing.B) {
-	const (
-		subjectBaseName = "test-subject"
-		numPubs         = 5
-	)
 
 	type BenchPublisher struct {
 		// nats connection for this publisher
@@ -402,7 +405,11 @@ func BenchmarkCoreFanIn(b *testing.B) {
 		publishCounter int
 		// quit channel which will terminate publishing
 		quitCh chan bool
+		// message data buffer
+		messageData []byte
 	}
+
+	const subjectBaseName = "test-subject"
 
 	messageSizeCases := []int64{
 		100,        // 100B
@@ -427,6 +434,152 @@ func BenchmarkCoreFanIn(b *testing.B) {
 		}
 	}
 
+	workload := func(b *testing.B, clientUrl string, numPubs int, messageSize int64) {
+
+		// connection options
+		opts := []nats.Option{
+			nats.MaxReconnects(-1),
+			nats.ReconnectWait(0),
+			nats.ErrorHandler(ignoreSlowConsumerErrorHandler),
+		}
+
+		// waits for all publishers sub-routines and for main thread to be ready
+		var publishersReadyWg sync.WaitGroup
+		publishersReadyWg.Add(numPubs + 1)
+
+		// wait group to ensure all publishers have been torn down
+		var finishedPublishersWg sync.WaitGroup
+		finishedPublishersWg.Add(numPubs)
+
+		publishers := make([]BenchPublisher, numPubs)
+		// create N publishers
+		for i := range publishers {
+			// create publisher connection
+			ncPub, err := nats.Connect(clientUrl, opts...)
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer ncPub.Close()
+
+			// create bench publisher object
+			publisher := BenchPublisher{
+				conn:           ncPub,
+				publishErrors:  0,
+				publishCounter: 0,
+				quitCh:         make(chan bool, 1),
+				messageData:    make([]byte, messageSize),
+			}
+			rand.New(rand.NewSource(int64(i))).Read(publisher.messageData)
+			publishers[i] = publisher
+		}
+
+		// total number of publishers that have published b.N to the subscriber successfully
+		completedPublishersCount := 0
+
+		// wait group blocks main thread until publish workload is completed, it is decremented after subscriber receives b.N messages from all publishers
+		var benchCompleteWg sync.WaitGroup
+		benchCompleteWg.Add(1)
+
+		// start subscriber
+		ncSub, err := nats.Connect(clientUrl, opts...)
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer ncSub.Close()
+
+		// subscriber
+		ncSub.Subscribe(fmt.Sprintf("%s.*", subjectBaseName), func(msg *nats.Msg) {
+			// get the publisher id from subject
+			pubIdx, err := strconv.Atoi(msg.Subject[len(subjectBaseName)+1:])
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			// message successfully received from publisher
+			publishers[pubIdx].publishCounter += 1
+
+			// subscriber has received a total of b.N messages from this publisher
+			if publishers[pubIdx].publishCounter == b.N {
+				completedPublishersCount++
+				// every publisher has successfully sent b.N messages to subscriber
+				if completedPublishersCount == numPubs {
+					benchCompleteWg.Done()
+				}
+			}
+		})
+
+		// start publisher sub-routines
+		for i := range publishers {
+			go func(pubId int) {
+
+				// publisher sub-routine initialized
+				publishersReadyWg.Done()
+
+				publisher := publishers[pubId]
+				subject := fmt.Sprintf("%s.%d", subjectBaseName, pubId)
+
+				// signal that this publisher has been torn down
+				defer finishedPublishersWg.Done()
+
+				// wait till all other publishers are ready to start workload
+				publishersReadyWg.Wait()
+
+				// publish until quitCh is closed
+				for {
+					select {
+					case <-publisher.quitCh:
+						return
+					default:
+						// continue publishing
+					}
+					fastRandomMutation(publisher.messageData, 10)
+					err := publisher.conn.Publish(subject, publisher.messageData)
+					if err != nil {
+						publisher.publishErrors += 1
+					}
+				}
+			}(i)
+		}
+
+		// set bytes per operation
+		b.SetBytes(messageSize)
+		// main thread is ready
+		publishersReadyWg.Done()
+		// wait till publishers are ready
+		publishersReadyWg.Wait()
+
+		// start the clock
+		b.ResetTimer()
+		// wait till termination cond reached
+		benchCompleteWg.Wait()
+		// stop the clock
+		b.StopTimer()
+
+		// send quit signal to all publishers
+		for i := range publishers {
+			publishers[i].quitCh <- true
+		}
+		// wait for all publishers to shutdown
+		finishedPublishersWg.Wait()
+
+		// sum errors from all publishers
+		totalErrors := 0
+		for _, publisher := range publishers {
+			totalErrors += publisher.publishErrors
+		}
+		// sum total messages sent from all publishers
+		totalMessages := 0
+		for _, publisher := range publishers {
+			totalMessages += publisher.publishCounter
+		}
+		errorRate := 100 * float64(totalErrors) / float64(totalMessages)
+
+		// report error rate
+		b.ReportMetric(errorRate, "%error")
+
+	}
+
+	// benchmark case matrix
 	for _, messageSize := range messageSizeCases {
 		b.Run(
 			fmt.Sprintf("msgSz=%db", messageSize),
@@ -435,151 +588,27 @@ func BenchmarkCoreFanIn(b *testing.B) {
 					b.Run(
 						fmt.Sprintf("pubs=%d", numPubs),
 						func(b *testing.B) {
-
 							// start server
 							defaultOpts := DefaultOptions()
 							server := RunServer(defaultOpts)
 							defer server.Shutdown()
 
-							opts := []nats.Option{
-								nats.MaxReconnects(-1),
-								nats.ReconnectWait(0),
-								nats.ErrorHandler(ignoreSlowConsumerErrorHandler),
-							}
-
+							// get connection string
 							clientUrl := server.ClientURL()
 
-							// start subscriber
-							ncSub, err := nats.Connect(clientUrl, opts...)
-							if err != nil {
-								b.Fatal(err)
-							}
-							defer ncSub.Close()
-
-							publishers := make([]BenchPublisher, numPubs)
-							for i := range publishers {
-								publishers[i].quitCh = make(chan bool, 1)
-							}
-
-							// total number of publishers that have published b.N to the subscriber successfully
-							completedPublishersCount := 0
-
-							// wait group blocks main thread until publish workload is completed, it is decremented after subscriber receives b.N messages from all publishers
-							var benchCompleteWg sync.WaitGroup
-							benchCompleteWg.Add(1)
-
-							ncSub.Subscribe(fmt.Sprintf("%s.*", subjectBaseName), func(msg *nats.Msg) {
-								// get the publisher id from subject
-								pubIdx, err := strconv.Atoi(msg.Subject[len(subjectBaseName)+1:])
-								if err != nil {
-									b.Fatal(err)
-								}
-
-								// message successfully received from publisher
-								publishers[pubIdx].publishCounter += 1
-
-								// subscriber has received a total of b.N messages from this publisher
-								if publishers[pubIdx].publishCounter == b.N {
-									completedPublishersCount++
-									// every publisher has successfully sent b.N messages to subscriber
-									if completedPublishersCount == numPubs {
-										benchCompleteWg.Done()
-									}
-								}
-							})
-
-							// random bytes as payload
-							messageData := make([]byte, messageSize)
-							rand.Read(messageData)
-
-							var publishersReadyWg sync.WaitGroup
-							// waits for all publishers sub-routines and for main thread to be ready
-							publishersReadyWg.Add(numPubs + 1)
-
-							// wait group to ensure all publishers have been torn down
-							var finishedPublishersWg sync.WaitGroup
-							finishedPublishersWg.Add(numPubs)
-
-							// create N publishers
-							for i := range publishers {
-								// create publisher connection and attach to bench publisher object
-								ncPub, err := nats.Connect(clientUrl, opts...)
-								if err != nil {
-									b.Fatal(err)
-								}
-								publishers[i].conn = ncPub
-
-								// publisher successfully initialized
-								publishersReadyWg.Done()
-
-								defer ncPub.Close()
-							}
-
-							for i := range publishers {
-								go func(pubId int) {
-									publisher := publishers[pubId]
-									subject := fmt.Sprintf("%s.%d", subjectBaseName, pubId)
-
-									// signal that this publisher has been torn down
-									defer finishedPublishersWg.Done()
-
-									// wait till all other publishers are ready to start workload
-									publishersReadyWg.Wait()
-
-									// publish until quitCh is closed
-									for {
-										select {
-										case <-publisher.quitCh:
-											return
-										default:
-											// continue publishing
-										}
-										err := publisher.conn.Publish(subject, messageData)
-										if err != nil {
-											publisher.publishErrors += 1
-										}
-									}
-								}(i)
-							}
-
-							// set bytes per operation
-							b.SetBytes(messageSize)
-							// main thread is ready
-							publishersReadyWg.Done()
-							// wait till publishers are ready
-							publishersReadyWg.Wait()
-
-							// start the clock
-							b.ResetTimer()
-							// wait till termination cond reached
-							benchCompleteWg.Wait()
-							// stop the clock
-							b.StopTimer()
-
-							// send quit signal to all publishers
-							for i := range publishers {
-								publishers[i].quitCh <- true
-							}
-							// wait for all publishers to shutdown
-							finishedPublishersWg.Wait()
-
-							// sum errors from all publishers
-							totalErrors := 0
-							for _, publisher := range publishers {
-								totalErrors += publisher.publishErrors
-							}
-							// sum total messages sent from all publishers
-							totalMessages := 0
-							for _, publisher := range publishers {
-								totalMessages += publisher.publishCounter
-							}
-							errorRate := 100 * float64(totalErrors) / float64(totalMessages)
-
-							// report error rate
-							b.ReportMetric(errorRate, "%error")
-
+							// run fan-in workload
+							workload(b, clientUrl, numPubs, messageSize)
 						})
 				}
 			})
+	}
+}
+
+// fastRandomMutation performs a minor in-place mutation to the given buffer.
+// This is useful in benchmark to avoid sending the same payload every time (which could result in some optimizations
+// we do not want to measure), while not slowing down the benchmark with a full payload generated for each operation.
+func fastRandomMutation(data []byte, mutations int) {
+	for i := 0; i < mutations; i++ {
+		data[fastrand.Uint32n(uint32(len(data)))] = byte(fastrand.Uint32() % math.MaxUint8)
 	}
 }

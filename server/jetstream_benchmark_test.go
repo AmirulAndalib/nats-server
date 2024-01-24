@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats-server/v2/internal/fastrand"
 	"github.com/nats-io/nats.go"
 )
 
@@ -329,12 +330,12 @@ func BenchmarkJetStreamConsume(b *testing.B) {
 								_, js = jsClientConnectURL(b, connectURL)
 							}
 
-							rng := rand.New(rand.NewSource(int64(seed)))
 							message := make([]byte, bc.messageSize)
+							rand.New(rand.NewSource(int64(seed))).Read(message)
 
 							// Publish b.N messages to the stream (in batches)
 							for i := 1; i <= b.N; i++ {
-								rng.Read(message)
+								fastRandomMutation(message, 10)
 								_, err := js.PublishAsync(subject, message)
 								if err != nil {
 									b.Fatalf("Failed to publish: %s", err)
@@ -412,14 +413,14 @@ func BenchmarkJetStreamPublish(b *testing.B) {
 
 	runSyncPublisher := func(b *testing.B, js nats.JetStreamContext, messageSize int, subjects []string) (int, int) {
 		published, errors := 0, 0
-		rng := rand.New(rand.NewSource(int64(seed)))
 		message := make([]byte, messageSize)
+		rand.New(rand.NewSource(int64(seed))).Read(message)
 
 		b.ResetTimer()
 
 		for i := 1; i <= b.N; i++ {
-			rng.Read(message) // TODO may skip this?
-			subject := subjects[rng.Intn(len(subjects))]
+			fastRandomMutation(message, 10)
+			subject := subjects[fastrand.Uint32n(uint32(len(subjects)))]
 			_, pubErr := js.Publish(subject, message)
 			if pubErr != nil {
 				errors++
@@ -441,6 +442,7 @@ func BenchmarkJetStreamPublish(b *testing.B) {
 		const publishCompleteMaxWait = 30 * time.Second
 		rng := rand.New(rand.NewSource(int64(seed)))
 		message := make([]byte, messageSize)
+		rng.Read(message)
 
 		published, errors := 0, 0
 
@@ -458,7 +460,7 @@ func BenchmarkJetStreamPublish(b *testing.B) {
 			pending := make([]nats.PubAckFuture, 0, publishBatchSize)
 
 			for i := 0; i < publishBatchSize; i++ {
-				rng.Read(message) // TODO may skip this?
+				fastRandomMutation(message, 10)
 				subject := subjects[rng.Intn(len(subjects))]
 				pubAckFuture, err := js.PublishAsync(subject, message)
 				if err != nil {
@@ -719,13 +721,13 @@ func BenchmarkJetStreamInterestStreamWithLimit(b *testing.B) {
 		defer ctx.completedWg.Done()
 		errors := 0
 		messageBuf := make([]byte, messageSize)
-		rng := rand.New(rand.NewSource(int64(seed + publisherId)))
+		rand.New(rand.NewSource(int64(seed + publisherId))).Read(messageBuf)
 
 		// Warm up: publish a few messages
 		for i := 0; i < warmupMessages; i++ {
-			subject := fmt.Sprintf("%s.%d", subjectPrefix, rng.Intn(numSubjects))
+			subject := fmt.Sprintf("%s.%d", subjectPrefix, fastrand.Uint32n(numSubjects))
 			if randomData {
-				rng.Read(messageBuf)
+				fastRandomMutation(messageBuf, 10)
 			}
 			_, err := js.Publish(subject, messageBuf)
 			if err != nil {
@@ -760,9 +762,9 @@ func BenchmarkJetStreamInterestStreamWithLimit(b *testing.B) {
 
 			// Publish a batch of messages
 			for i := 0; i < batchSize; i++ {
-				subject := fmt.Sprintf("%s.%d", subjectPrefix, rng.Intn(numSubjects))
+				subject := fmt.Sprintf("%s.%d", subjectPrefix, fastrand.Uint32n(numSubjects))
 				if randomData {
-					rng.Read(messageBuf)
+					fastRandomMutation(messageBuf, 10)
 				}
 				_, err := js.Publish(subject, messageBuf)
 				if err != nil {
@@ -921,15 +923,16 @@ func BenchmarkJetStreamKV(b *testing.B) {
 	}
 
 	runKVPut := func(b *testing.B, kv nats.KeyValue, keys []string, valueSize int) int {
-		rng := rand.New(rand.NewSource(int64(seed)))
+
 		value := make([]byte, valueSize)
+		rand.New(rand.NewSource(int64(seed))).Read(value)
 		errors := 0
 
 		b.ResetTimer()
 
 		for i := 1; i <= b.N; i++ {
-			key := keys[rng.Intn(len(keys))]
-			rng.Read(value)
+			key := keys[fastrand.Uint32n(uint32(len(keys)))]
+			fastRandomMutation(value, 10)
 			_, err := kv.Put(key, value)
 			if err != nil {
 				errors++
@@ -946,14 +949,14 @@ func BenchmarkJetStreamKV(b *testing.B) {
 	}
 
 	runKVUpdate := func(b *testing.B, kv nats.KeyValue, keys []string, valueSize int) int {
-		rng := rand.New(rand.NewSource(int64(seed)))
 		value := make([]byte, valueSize)
+		rand.New(rand.NewSource(int64(seed))).Read(value)
 		errors := 0
 
 		b.ResetTimer()
 
 		for i := 1; i <= b.N; i++ {
-			key := keys[rng.Intn(len(keys))]
+			key := keys[fastrand.Uint32n(uint32(len(keys)))]
 
 			kve, getErr := kv.Get(key)
 			if getErr != nil {
@@ -961,7 +964,7 @@ func BenchmarkJetStreamKV(b *testing.B) {
 				continue
 			}
 
-			rng.Read(value)
+			fastRandomMutation(value, 10)
 			_, updateErr := kv.Update(key, value, kve.Revision())
 			if updateErr != nil {
 				errors++
@@ -1144,7 +1147,9 @@ func BenchmarkJetStreamObjStore(b *testing.B) {
 			writes int
 		)
 
+		dataBuf := make([]byte, maxObjSz)
 		rng := rand.New(rand.NewSource(int64(seed)))
+		rng.Read(dataBuf)
 
 		// Each operation is processing a random amount of bytes within a size range which
 		// will be either read from or written to an object store bucket. However, here we are
@@ -1165,8 +1170,8 @@ func BenchmarkJetStreamObjStore(b *testing.B) {
 				// Write Op
 				// dataSz is a random value between min-max object size and cannot be less than 1 byte
 				dataSz := rng.Intn(maxObjSz-minObjSz+1) + minObjSz
-				data := make([]byte, dataSz)
-				rng.Read(data)
+				data := dataBuf[:dataSz]
+				fastRandomMutation(data, 10)
 				_, err = objStore.PutBytes(key, data)
 				writes++
 			}
@@ -1292,6 +1297,199 @@ func BenchmarkJetStreamObjStore(b *testing.B) {
 				}
 			},
 		)
+	}
+}
+
+func BenchmarkJetStreamMultiProducer(b *testing.B) {
+	const (
+		subject    = "test-subject"
+		streamName = "test-stream"
+	)
+
+	type BenchPublisher struct {
+		// nats connection for this publisher
+		conn *nats.Conn
+		// jetstream context
+		js nats.JetStreamContext
+		// message buffer
+		messageData []byte
+		// number of publish calls
+		publishCalls int
+		// number of publish errors
+		publishErrors int
+	}
+
+	messageSizeCases := []int64{
+		100,        // 100B
+		1024,       // 1KiB
+		10240,      // 10KiB
+		512 * 1024, // 512KiB
+	}
+	numPubsCases := []int{
+		3,
+		5,
+		10,
+	}
+
+	replicasCases := []struct {
+		clusterSize int
+		replicas    int
+	}{
+		{1, 1},
+		{3, 3},
+	}
+
+	workload := func(b *testing.B, numPubs int, messageSize int64, clientUrl string) {
+
+		// create N publishers
+		publishers := make([]BenchPublisher, numPubs)
+		for i := range publishers {
+			// create publisher connection and jetstream context
+			ncPub, err := nats.Connect(clientUrl)
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer ncPub.Close()
+			jsPub, err := ncPub.JetStream()
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			// initialize publisher
+			publishers[i] = BenchPublisher{
+				conn:          ncPub,
+				js:            jsPub,
+				messageData:   make([]byte, messageSize),
+				publishCalls:  0,
+				publishErrors: 0,
+			}
+			rand.New(rand.NewSource(int64(i))).Read(publishers[i].messageData)
+		}
+
+		// waits for all publishers sub-routines and for main thread to be ready
+		var workloadReadyWg sync.WaitGroup
+		workloadReadyWg.Add(1 + numPubs)
+
+		// wait group blocks main thread until publish workload is completed, it is decremented after stream receives b.N messages from all publishers
+		var benchCompleteWg sync.WaitGroup
+		benchCompleteWg.Add(1)
+
+		// wait group to ensure all publishers have been torn down
+		var finishedPublishersWg sync.WaitGroup
+		finishedPublishersWg.Add(numPubs)
+
+		// start go routines for all publishers, wait till all publishers are initialized before starting publish workload
+		for i := range publishers {
+
+			go func(pubId int) {
+				// signal that this publisher has been torn down
+				defer finishedPublishersWg.Done()
+
+				// publisher sub-routine is ready
+				workloadReadyWg.Done()
+
+				// start workload when main thread and all other publishers are ready
+				workloadReadyWg.Wait()
+
+				// publish until stream receives b.N messages
+				for {
+					// random bytes as payload
+					fastRandomMutation(publishers[pubId].messageData, 10)
+					// attempt to publish message
+					pubAck, err := publishers[pubId].js.Publish(subject, publishers[pubId].messageData)
+					publishers[pubId].publishCalls += 1
+					if err != nil {
+						publishers[pubId].publishErrors += 1
+						continue
+					}
+					// all messages have been published to stream
+					if pubAck.Sequence == uint64(b.N) {
+						benchCompleteWg.Done()
+					}
+					// a publisher has already published b.N messages, stop publishing
+					if pubAck.Sequence >= uint64(b.N) {
+						return
+					}
+				}
+			}(i)
+		}
+
+		// set bytes per operation
+		b.SetBytes(messageSize)
+
+		// main thread is ready
+		workloadReadyWg.Done()
+		// start the clock
+		b.ResetTimer()
+
+		// wait till termination cond reached
+		benchCompleteWg.Wait()
+		// stop the clock
+		b.StopTimer()
+
+		// wait for all publishers to shutdown
+		finishedPublishersWg.Wait()
+
+		// sum up publish calls and errors
+		publishCalls := 0
+		publishErrors := 0
+		for _, pub := range publishers {
+			publishCalls += pub.publishCalls
+			publishErrors += pub.publishErrors
+		}
+
+		// report error rate
+		errorRate := 100 * float64(publishErrors) / float64(publishCalls)
+		b.ReportMetric(errorRate, "%error")
+	}
+
+	// benchmark case matrix
+	for _, replicasCase := range replicasCases {
+		b.Run(
+			fmt.Sprintf("N=%d,R=%d", replicasCase.clusterSize, replicasCase.replicas),
+			func(b *testing.B) {
+				for _, messageSize := range messageSizeCases {
+					b.Run(
+						fmt.Sprintf("msgSz=%db", messageSize),
+						func(b *testing.B) {
+							for _, numPubs := range numPubsCases {
+								b.Run(
+									fmt.Sprintf("pubs=%d", numPubs),
+									func(b *testing.B) {
+
+										// start jetstream cluster
+										cl, ls, shutdown, nc, js := startJSClusterAndConnect(b, replicasCase.clusterSize)
+										defer shutdown()
+										defer nc.Close()
+										clientUrl := ls.ClientURL()
+
+										// create stream
+										_, err := js.AddStream(&nats.StreamConfig{
+											Name:     streamName,
+											Subjects: []string{subject},
+											Replicas: replicasCase.replicas,
+										})
+										if err != nil {
+											b.Fatal(err)
+										}
+										defer js.DeleteStream(streamName)
+
+										// If replicated resource, connect to stream leader for lower variability
+										if replicasCase.replicas > 1 {
+											nc.Close()
+											clientUrl = cl.streamLeader("$G", streamName).ClientURL()
+											nc, _ = jsClientConnectURL(b, clientUrl)
+											defer nc.Close()
+										}
+
+										// run workload
+										workload(b, numPubs, messageSize, clientUrl)
+									},
+								)
+							}
+						})
+				}
+			})
 	}
 }
 
