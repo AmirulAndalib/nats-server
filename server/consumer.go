@@ -104,6 +104,9 @@ type ConsumerConfig struct {
 
 	// Metadata is additional metadata for the Consumer.
 	Metadata map[string]string `json:"metadata,omitempty"`
+
+	// PausedUntil is for suspending the consumer until the deadline.
+	PausedUntil time.Time `json:"paused_until,omitempty"`
 }
 
 // SequenceInfo has both the consumer and the stream sequence and last activity.
@@ -352,11 +355,12 @@ type consumer struct {
 	active            bool
 	replay            bool
 	dtmr              *time.Timer
+	uptmr             *time.Timer // Unpause timer
 	gwdtmr            *time.Timer
 	dthresh           time.Duration
-	mch               chan struct{}
-	qch               chan struct{}
-	inch              chan bool
+	mch               chan struct{} // Message channel
+	qch               chan struct{} // Quit channel
+	inch              chan bool     // Interest change channel
 	sfreq             int32
 	ackEventT         string
 	nakEventT         string
@@ -1002,6 +1006,9 @@ func (mset *stream) addConsumerWithAssignment(config *ConsumerConfig, oname stri
 	// Check/update the inactive threshold
 	o.updateInactiveThreshold(&o.cfg)
 
+	// Check/update the pause state
+	o.updatePauseState(&o.cfg)
+
 	if o.isPushMode() {
 		// Check if we are running only 1 replica and that the delivery subject has interest.
 		// Check in place here for interest. Will setup properly in setLeader.
@@ -1070,6 +1077,30 @@ func (o *consumer) updateInactiveThreshold(cfg *ConsumerConfig) {
 		// We accept InactiveThreshold be set to 0 (for durables)
 		o.dthresh = 0
 	}
+}
+
+// Updates the paused state. If we are the leader and the pause deadline
+// hasn't passed yet then we will start a timer to kick the consumer once
+// that deadline is reached.
+func (o *consumer) updatePauseState(cfg *ConsumerConfig) {
+	if o.uptmr != nil {
+		stopAndClearTimer(&o.uptmr)
+	}
+	if !o.isLeader() {
+		// Only the leader will run the timer as only the leader will run
+		// loopAndGatherMsgs.
+		return
+	}
+	if cfg.PausedUntil.Before(time.Now()) {
+		// Either the PausedUntil is unset (is effectively zero) or the
+		// deadline has already passed, in which case there is nothing
+		// to do.
+		return
+	}
+	o.uptmr = time.AfterFunc(time.Until(cfg.PausedUntil), func() {
+		o.signalNewMessages()
+		stopAndClearTimer(&o.uptmr)
+	})
 }
 
 func (o *consumer) consumerAssignment() *consumerAssignment {
@@ -1265,6 +1296,9 @@ func (o *consumer) setLeader(isLeader bool) {
 			o.dtmr = time.AfterFunc(o.dthresh, o.deleteNotActive)
 		}
 
+		// Update the consumer pause tracking.
+		o.updatePauseState(&o.cfg)
+
 		// If we are not in ReplayInstant mode mark us as in replay state until resolved.
 		if o.cfg.ReplayPolicy != ReplayInstant {
 			o.replay = true
@@ -1332,7 +1366,8 @@ func (o *consumer) setLeader(isLeader bool) {
 		}
 		// Stop any inactivity timers. Should only be running on leaders.
 		stopAndClearTimer(&o.dtmr)
-
+		// Stop any unpause timers. Should only be running on leaders.
+		stopAndClearTimer(&o.uptmr)
 		// Make sure to clear out any re-deliver queues
 		stopAndClearTimer(&o.ptmr)
 		o.rdq = nil
@@ -1859,6 +1894,9 @@ func (o *consumer) updateConfig(cfg *ConsumerConfig) error {
 		if o.isLeader() && o.dthresh > 0 {
 			o.dtmr = time.AfterFunc(o.dthresh, o.deleteNotActive)
 		}
+	}
+	if val := cfg.PausedUntil; val != o.cfg.PausedUntil {
+		o.updatePauseState(cfg)
 	}
 
 	// Check for Subject Filters update.
@@ -3841,6 +3879,8 @@ func (o *consumer) suppressDeletion() {
 	}
 }
 
+// loopAndGatherMsgs waits for messages for the consumer. qch is the quit channel,
+// upch is the unpause channel which fires when the PausedUntil deadline is reached.
 func (o *consumer) loopAndGatherMsgs(qch chan struct{}) {
 	// On startup check to see if we are in a reply situation where replay policy is not instant.
 	var (
@@ -3914,6 +3954,10 @@ func (o *consumer) loopAndGatherMsgs(qch chan struct{}) {
 			}
 		} else if o.waiting.isEmpty() {
 			// If we are in pull mode and no one is waiting already break and wait.
+			goto waitForMsgs
+		} else if time.Now().Before(o.cfg.PausedUntil) {
+			// If the consumer is paused and we haven't reached the deadline yet then
+			// go back to waiting.
 			goto waitForMsgs
 		}
 
@@ -5179,6 +5223,7 @@ func (o *consumer) switchToEphemeral() {
 	rr := o.acc.sl.Match(o.cfg.DeliverSubject)
 	// Setup dthresh.
 	o.updateInactiveThreshold(&o.cfg)
+	o.updatePauseState(&o.cfg)
 	o.mu.Unlock()
 
 	// Update interest
