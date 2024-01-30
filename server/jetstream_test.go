@@ -22314,3 +22314,88 @@ func TestJetStreamConsumerNakThenAckFloorMove(t *testing.T) {
 	require_Equal(t, ci.AckFloor.Stream, 11)
 	require_Equal(t, ci.NumAckPending, 0)
 }
+
+func TestJetStreamConsumerPause(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+	})
+	require_NoError(t, err)
+
+	// ------------ Create consumer with no pause ------------
+
+	ci, err := js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Name: "my_consumer",
+	})
+	require_NoError(t, err)
+
+	sub, err := js.PullSubscribe("foo", "", nats.Bind("TEST", "my_consumer"))
+	require_NoError(t, err)
+
+	// This should succeed as there's no pause, so it definitely
+	// shouldn't take more than a second.
+	for i := 0; i < 10; i++ {
+		_, err = js.Publish("foo", []byte("OK"))
+		require_NoError(t, err)
+	}
+	msgs, err := sub.Fetch(10, nats.MaxWait(time.Second))
+	require_NoError(t, err)
+	require_Equal(t, len(msgs), 10)
+
+	// ------------ Pause the consumer ------------
+
+	// Now we'll pause the consumer for 3 seconds.
+	deadline := time.Now().Add(time.Second * 3)
+	ci.Config.PausedUntil = deadline
+	_, err = js.UpdateConsumer("TEST", &ci.Config)
+	require_NoError(t, err)
+
+	// This should fail as we'll wait for only half of the deadline.
+	for i := 0; i < 10; i++ {
+		_, err = js.Publish("foo", []byte("OK"))
+		require_NoError(t, err)
+	}
+	_, err = sub.Fetch(10, nats.MaxWait(time.Until(deadline)/2))
+	require_Error(t, err, nats.ErrTimeout)
+
+	// This should succeed after a short wait, and when we're done,
+	// we should be after the deadline.
+	msgs, err = sub.Fetch(10)
+	require_NoError(t, err)
+	require_Equal(t, len(msgs), 10)
+	require_True(t, time.Now().After(deadline))
+
+	// ------------ The consumer unpaused itself ------------
+
+	// This should succeed as there's no pause, so it definitely
+	// shouldn't take more than a second.
+	for i := 0; i < 10; i++ {
+		_, err = js.Publish("foo", []byte("OK"))
+		require_NoError(t, err)
+	}
+	msgs, err = sub.Fetch(10, nats.MaxWait(time.Second))
+	require_NoError(t, err)
+	require_Equal(t, len(msgs), 10)
+
+	// ------------ Unset the pause and check still works ------------
+
+	ci.Config.PausedUntil = time.Time{}
+	_, err = js.UpdateConsumer("TEST", &ci.Config)
+	require_NoError(t, err)
+
+	// This should succeed as there's no pause, so it definitely
+	// shouldn't take more than a second.
+	for i := 0; i < 10; i++ {
+		_, err = js.Publish("foo", []byte("OK"))
+		require_NoError(t, err)
+	}
+	msgs, err = sub.Fetch(10, nats.MaxWait(time.Second))
+	require_NoError(t, err)
+	require_Equal(t, len(msgs), 10)
+}
