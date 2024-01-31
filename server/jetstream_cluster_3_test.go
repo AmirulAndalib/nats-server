@@ -5996,6 +5996,79 @@ func TestJetStreamClusterStreamResetPreacks(t *testing.T) {
 	})
 }
 
+func TestJetStreamClusterConsumerPause(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	ci, err := js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Name:     "my_consumer",
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	sub, err := js.PullSubscribe("foo", "", nats.Bind("TEST", "my_consumer"))
+	require_NoError(t, err)
+
+	stepdown := func() {
+		t.Helper()
+		_, err := nc.Request(fmt.Sprintf(JSApiConsumerLeaderStepDownT, "TEST", "my_consumer"), nil, time.Second)
+		require_NoError(t, err)
+		c.waitOnConsumerLeader(globalAccountName, "TEST", "my_consumer")
+	}
+
+	publish := func(wait time.Duration) {
+		t.Helper()
+		for i := 0; i < 5; i++ {
+			_, err = js.Publish("foo", []byte("OK"))
+			require_NoError(t, err)
+		}
+		msgs, err := sub.Fetch(5, nats.MaxWait(wait))
+		require_NoError(t, err)
+		require_Equal(t, len(msgs), 5)
+	}
+
+	// This should be fast as there's no deadline.
+	publish(time.Second)
+
+	// Now we're going to set the deadline.
+	ci.Config.PausedUntil = time.Now().Add(time.Second * 3)
+	ci, err = js.UpdateConsumer("TEST", &ci.Config)
+	require_NoError(t, err)
+
+	// It will now take longer than 3 seconds.
+	publish(time.Second * 5)
+	require_True(t, time.Now().After(ci.Config.PausedUntil))
+
+	// The next set of publishes after the deadline should now be fast.
+	publish(time.Second)
+
+	// We'll kick the leader, but since we're after the deadline, this
+	// should still be fast.
+	stepdown()
+	publish(time.Second)
+
+	// Now we're going to do an update and then immediately kick the
+	// leader. The pause should still be in effect afterwards.
+	ci.Config.PausedUntil = time.Now().Add(time.Second * 3)
+	ci, err = js.UpdateConsumer("TEST", &ci.Config)
+	require_NoError(t, err)
+	publish(time.Second * 5)
+	require_True(t, time.Now().After(ci.Config.PausedUntil))
+
+	// The next set of publishes after the deadline should now be fast.
+	publish(time.Second)
+}
+
 func TestJetStreamClusterConsumerPauseTimerFollowsLeader(t *testing.T) {
 	c := createJetStreamClusterExplicit(t, "R3S", 3)
 	defer c.shutdown()
