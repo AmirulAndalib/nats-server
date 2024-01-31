@@ -5995,3 +5995,44 @@ func TestJetStreamClusterStreamResetPreacks(t *testing.T) {
 		return nil
 	})
 }
+
+func TestJetStreamClusterConsumerPauseTimerFollowsLeader(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	_, err = js.AddConsumer("TEST", &nats.ConsumerConfig{
+		Name:        "my_consumer",
+		PausedUntil: time.Now().Add(time.Hour),
+		Replicas:    3,
+	})
+	require_NoError(t, err)
+
+	for i := 0; i < 10; i++ {
+		leader := c.consumerLeader(globalAccountName, "TEST", "my_consumer")
+
+		for _, s := range c.servers {
+			ga := s.getJetStream().accounts[globalAccountName]
+			stream := ga.streams["TEST"]
+			consumer := stream.consumers["my_consumer"]
+
+			isLeader := s == leader
+			hasTimer := consumer.uptmr != nil
+			require_Equal(t, isLeader, hasTimer)
+		}
+
+		_, err = nc.Request(fmt.Sprintf(JSApiConsumerLeaderStepDownT, "TEST", "my_consumer"), nil, time.Second)
+		require_NoError(t, err)
+
+		c.waitOnConsumerLeader(globalAccountName, "TEST", "my_consumer")
+	}
+}
