@@ -1081,7 +1081,7 @@ func (o *consumer) updateInactiveThreshold(cfg *ConsumerConfig) {
 
 // Updates the paused state. If we are the leader and the pause deadline
 // hasn't passed yet then we will start a timer to kick the consumer once
-// that deadline is reached.
+// that deadline is reached. Lock should be held.
 func (o *consumer) updatePauseState(cfg *ConsumerConfig) {
 	if o.uptmr != nil {
 		stopAndClearTimer(&o.uptmr)
@@ -1098,8 +1098,11 @@ func (o *consumer) updatePauseState(cfg *ConsumerConfig) {
 		return
 	}
 	o.uptmr = time.AfterFunc(time.Until(cfg.PausedUntil), func() {
-		o.signalNewMessages()
+		o.mu.Lock()
+		defer o.mu.Unlock()
+
 		stopAndClearTimer(&o.uptmr)
+		o.signalNewMessages()
 	})
 }
 

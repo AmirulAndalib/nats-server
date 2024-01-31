@@ -6024,9 +6024,10 @@ func TestJetStreamClusterConsumerPauseTimerFollowsLeader(t *testing.T) {
 			ga := s.getJetStream().accounts[globalAccountName]
 			stream := ga.streams["TEST"]
 			consumer := stream.consumers["my_consumer"]
-
+			consumer.mu.RLock()
 			isLeader := s == leader
 			hasTimer := consumer.uptmr != nil
+			consumer.mu.RUnlock()
 			require_Equal(t, isLeader, hasTimer)
 		}
 
