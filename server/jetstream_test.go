@@ -9511,6 +9511,57 @@ func TestJetStreamMirrorBasics(t *testing.T) {
 
 }
 
+func TestJetStreamMirrorStripExpectedHeaders(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	// Client for API requests.
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	// Create source and mirror streams.
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "S",
+		Subjects: []string{"foo"},
+	})
+	require_NoError(t, err)
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name:   "M",
+		Mirror: &nats.StreamSource{Name: "S"},
+	})
+	require_NoError(t, err)
+
+	m := nats.NewMsg("foo")
+	pubAck, err := js.PublishMsg(m)
+	require_NoError(t, err)
+	require_Equal(t, pubAck.Sequence, 1)
+
+	// Mirror should get message.
+	checkFor(t, 2*time.Second, 200*time.Millisecond, func() error {
+		if si, err := js.StreamInfo("M"); err != nil {
+			return err
+		} else if si.State.Msgs != 1 {
+			return fmt.Errorf("expected 1 mirrored msg, got %d", si.State.Msgs)
+		}
+		return nil
+	})
+
+	m.Header.Set("Nats-Expected-Stream", "S")
+	pubAck, err = js.PublishMsg(m)
+	require_NoError(t, err)
+	require_Equal(t, pubAck.Sequence, 2)
+
+	// Mirror should strip expected headers and store the message.
+	checkFor(t, 2*time.Second, 200*time.Millisecond, func() error {
+		if si, err := js.StreamInfo("M"); err != nil {
+			return err
+		} else if si.State.Msgs != 2 {
+			return fmt.Errorf("expected 2 mirrored msgs, got %d", si.State.Msgs)
+		}
+		return nil
+	})
+}
+
 func TestJetStreamMirrorUpdatePreventsSubjects(t *testing.T) {
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
@@ -20110,6 +20161,52 @@ func TestJetStreamDirectGetStartTimeSingleMsg(t *testing.T) {
 			msg, err := sub.NextMsg(25 * time.Millisecond)
 			require_NoError(t, err)
 			require_Equal(t, msg.Header.Get("Status"), "404")
+		})
+	}
+}
+
+func TestJetStreamStreamRetentionUpdatesConsumers(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	for _, tc := range []struct {
+		from RetentionPolicy
+		to   RetentionPolicy
+	}{
+		{LimitsPolicy, InterestPolicy},
+		{InterestPolicy, LimitsPolicy},
+	} {
+		from, to, name := tc.from, tc.to, fmt.Sprintf("%sTo%s", tc.from, tc.to)
+		t.Run(name, func(t *testing.T) {
+			sc, err := jsStreamCreate(t, nc, &StreamConfig{
+				Name:      name,
+				Subjects:  []string{name},
+				Retention: from,
+				Storage:   FileStorage,
+			})
+			require_NoError(t, err)
+
+			_, err = js.AddConsumer(name, &nats.ConsumerConfig{
+				Name:      "test_consumer",
+				AckPolicy: nats.AckExplicitPolicy,
+			})
+			require_NoError(t, err)
+
+			mset, err := s.globalAccount().lookupStream(name)
+			require_NoError(t, err)
+
+			o := mset.lookupConsumer("test_consumer")
+			require_NotNil(t, err)
+			require_Equal(t, o.retention, from)
+
+			sc.Retention = to
+			_, err = jsStreamUpdate(t, nc, sc)
+			require_NoError(t, err)
+
+			require_Equal(t, o.retention, to)
 		})
 	}
 }
